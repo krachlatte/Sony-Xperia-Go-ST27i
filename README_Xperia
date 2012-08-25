@@ -1,0 +1,7 @@
+Configuration files can be found in arch/arm/configs.
+
+Xperia P => semc_nypon_defconfig
+Xperia U => semc_kumquat_defconfig
+Xperia Sola => semc_pepper_defconfig
+Xperia Go => semc_lotus_defconfig
+

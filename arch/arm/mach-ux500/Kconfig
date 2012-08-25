@@ -1,0 +1,356 @@
+if ARCH_U8500
+
+# Old bootloaders pass the Nomadik machine type, and the MACH_ option named
+# after the machine type must be present and selected for machine_is_*() to
+# work
+config MACH_NOMADIK
+	bool
+
+config MACH_HREFV60
+	bool
+choice
+	prompt "Ux500 platform"
+	default UX500_SOC_DB8500
+
+config UX500_SOC_DB8500
+	select CPU_V7
+	select ARM_GIC
+	select SMP
+	select ARM_ERRATA_753970
+	select ARM_ERRATA_754322
+	select SYS_SOC
+	bool "U8500"
+
+config UX500_SOC_DB5500
+	select CPU_V7
+	select ARM_GIC
+	select SYS_SOC
+	bool "U5500"
+
+endchoice
+
+config UX500_SVP
+	bool
+
+if UX500_SOC_DB8500
+
+config U8500_SD_MMC_CARD_SUPPORT
+	bool
+
+menu "U8500 Machines"
+
+config MACH_U8500
+	bool "U8500 MOP500/HREF/custom HW"
+	select MACH_NOMADIK
+	select MACH_HREFV60
+	select U8500_SD_MMC_CARD_SUPPORT
+	help
+	  Supports the generic U8500 board type used for MOP500/HREF and some
+	  custom boards.  Boards using the generic type cannot be built
+	  together; select the specific board in the "U8500 HW" option.
+
+config MACH_U8500_PDP
+	bool "PDP R1"
+	select U8500_SD_MMC_CARD_SUPPORT
+	select U8500_SD_MMC_CARD_GPIO_PWR
+	help
+	  Supports PDP 2.0-2.2++ target board
+
+config MACH_U8500_PDP_R2
+	bool "PDP R2"
+	select U8500_SD_MMC_CARD_SUPPORT
+	help
+	  Supports PDP 2.4- target board
+
+config MACH_U8500_KUMQUAT
+	bool "Sony Ericsson Kumquat"
+	select WLAN_PMUEN_UX500
+	select CW1200_USE_GPIO_IRQ
+	help
+	  Support for the SonyEricsson Kumquat devices.
+
+config MACH_U8500_NYPON
+	bool "Sony Ericsson Nypon"
+	select WLAN_PMUEN_UX500
+	select CW1200_USE_GPIO_IRQ
+	help
+	  Support for Sony Ericsson Nypon devices.
+
+config MACH_U8500_PEPPER
+	bool "Sony Ericsson Pepper"
+	select WLAN_PMUEN_UX500
+	select CW1200_USE_GPIO_IRQ
+	select U8500_SD_MMC_CARD_SUPPORT
+	help
+	  Support for the SonyEricsson Pepper devices.
+
+config MACH_U8500_LOTUS
+	bool "Sony Ericsson Lotus"
+	select WLAN_PMUEN_UX500
+	select CW1200_USE_GPIO_IRQ
+	select U8500_SD_MMC_CARD_SUPPORT
+	help
+	  Support for the SonyEricsson Lotus devices.
+
+
+# If you are porting onto a new board, you really should be using a new machine
+# type and adding an entry into this list, not the "U8500 HW" list below.
+
+endmenu
+
+if MACH_U8500
+
+choice
+	prompt "U8500 HW"
+	default MACH_U8500_MOP
+
+config MACH_U8500_MOP
+	bool "MOP500/HREF"
+	help
+	  Supports MOP500/HREF development boards.
+
+endchoice
+
+endif
+
+endif
+
+if UX500_SOC_DB5500
+
+menu "U5500 Machines"
+
+config MACH_SVP5500
+	bool "U5500 Simulator (SVP5500)"
+	select UX500_SVP
+	help
+	  Support for the U5500 Simulator
+
+config MACH_B5500
+	bool "U5500 Big Board (B5500)"
+	help
+	  Support for the U5500 Big Board
+endmenu
+
+endif
+
+choice
+	prompt "Ux500 UIB Keylayout"
+	default KEYLAYOUT_LAYOUT1
+
+config KEYLAYOUT_LAYOUT1
+	bool "UIB Keylayout 1; for generic users"
+	help
+	  Supported keylayout for some numerics, power/call buttons,
+	  volume control etc
+
+config KEYLAYOUT_LAYOUT2
+	bool "UIB Keylayout 2; for connectivity users"
+	help
+	  Supports keylayout numerics 0-9, left/right/up/down/back/
+	  enter keys and special character "."(dot)
+
+endchoice
+
+choice
+	prompt "Ux500 sched_clock timer"
+	default UX500_MTU_TIMER
+
+config U8500_PRCMU_TIMER
+	bool "PRCMU Timer sched_clock"
+	depends on !HAS_MTU
+	help
+	  Add support for an always on sched_clock, required for
+	  proper cpuidle and suspend.
+
+config UX500_MTU_TIMER
+	bool "Multi Timer Unit sched_clock"
+	help
+	  Add sched_clock support for the Multi Timer Unit.
+	  Since mtu isn't always on cpuidle will not
+	  work with this clock.
+
+endchoice
+
+config U8500_PRCMU
+	bool "U8500 PRCMU support"
+	depends on UX500_SOC_DB8500
+	default n
+	help
+	  Add support for PRCMU for U8500
+
+config U5500_PRCMU
+	bool "U5500 PRCMU support"
+	depends on UX500_SOC_DB5500
+	default y
+	help
+	  Add support for PRCMU for U5500
+
+config UX500_PRCMU_QOS_POWER
+	bool "UX500 PRCMU power QoS support"
+	depends on (U5500_PRCMU || U8500_PRCMU)
+	default y
+	help
+	  Add support for PRCMU power Quality of Service
+
+config UX500_PRCMU_DEBUG
+	bool "PRCMU debug"
+	depends on ((U5500_PRCMU || U8500_PRCMU) && DEBUG_FS)
+	default n
+	help
+	  Add support for PRCMU debug
+
+config U8500_SAVE_RESET_REASON
+	bool "Save reset reason before restart"
+	depends on U8500_PRCMU
+	default n
+	help
+	  By enable this will save reset reason onto prcmu regs
+	  before a system reset.
+
+config STE_PREFIX_RSTREASN
+	bool "ST-E prefix for reset reason"
+	depends on (U8500_PRCMU || U5500_PRCMU)
+	default n
+	help
+	  Support for reset reason parameter in function arch_reset()
+
+config U8500_REGULATOR_DEBUG
+	bool "Regulator debug support"
+	depends on REGULATOR_VIRTUAL_CONSUMER
+
+config U5500_PWM
+	bool "PWM support"
+	default y
+	depends on UX500_SOC_DB5500
+	help
+	  Add support for PWM for U5500
+
+config MOP500_SDI
+	bool
+	default y
+	depends on ((MACH_U8500_MOP || MACH_U8500_PDP) && MMC_ARMMMCI)
+
+config ARCH_HAS_CPU_IDLE_WAIT
+	def_bool y
+
+config UX500_DEBUG_UART
+	int "Ux500 UART to use for low-level debug"
+	default 2 if UX500_SOC_DB8500
+	default 0 if UX500_SOC_DB5500
+	help
+	  Choose the UART on which kernel low-level debug messages should be
+	  output.
+
+
+config SENSORS1P_MOP
+	tristate "HAL and Proximity sensors support"
+	depends on REGULATOR && (GPIO_STMPE2401 || GPIO_TC35892)
+	default y
+	help
+	  Add support for Osram's SFH7741 Proximity Sensor and Samsumg
+	  HED54XXU11 HAL Switch
+
+config U5500_MODEM_IRQ
+	bool "Modem IRQ support"
+	depends on UX500_SOC_DB5500
+	default y
+	help
+	  Add support for handling IRQ:s from modem side
+
+config MOP500_NUIB
+	bool "MOP500 NUIB"
+	depends on MACH_U8500_MOP
+	default y
+	help
+	  Add support for the platform data of synaptics rmi4 driver
+
+config TEE_UX500
+	bool "Trusted Execution Environment (TEE) ux500 hardware support"
+	depends on TEE_SUPPORT
+	default y
+	help
+	  Adds TEE hardware support for ux500 platforms.
+
+config TEE_SVP
+	bool "Trusted Execution Environment (TEE) ux500 SVP support"
+	depends on TEE_SUPPORT && UX500_SVP
+	default y
+	help
+	  Adds TEE support for SVP in ux500 platforms.
+
+config DB8500_MLOADER
+	bool "Modem firmware upload/download support"
+	depends on UX500_SOC_DB8500
+	select DBX500_MLOADER
+	default n
+	help
+	  Adds Modem firmware upload/download support to DB8500.
+
+config U5500_MLOADER
+	bool "mLoader, mem config from kernel boot args exported to sysfs"
+	depends on UX500_SOC_DB5500
+	help
+	  Link between boot args and user space program that loads the modem ELF.
+	  This is used to expose the modem parameters using sysfs interface.
+
+config UX500_DEBUG_HWREG
+	bool "Debug hardware registers from userspace"
+	depends on (DEBUG_FS && UX500_SOC_DB8500)
+	help
+	  Adds various debug files to access registers.
+	  This should never ever be used for anything else than debugging.
+
+config UX500_DEBUG_NO_LAUTERBACH
+       bool "Disable clocks needed for Lauterbach debugging"
+       help
+	  Disable clocks needed for Lauterbach debugging at boot.
+	  If yes, you will reduce the power consumption.
+
+config UX500_L2X0_PREFETCH_CTRL
+	bool "PL310 prefetch control"
+	depends on (UX500_SOC_DB8500 || UX500_SOC_DB5500) && \
+			(TEE_UX500 && CACHE_L2X0)
+	default y
+	help
+	  Adds interface to control instruction and data prefetch.
+	  Communication with Trustzone is done through TEE driver.
+
+source "arch/arm/mach-ux500/Kconfig-arch"
+source "arch/arm/mach-ux500/pm/Kconfig"
+
+config SIMPLE_REMOTE_PLATFORM
+	bool "Simple Remote platform specific driver"
+	default n
+	help
+	  Provides support for detecting 3.5mm audio jack, such as wired
+	  headset. This is the platform specific layer.
+
+config SIMPLE_REMOTE_INVERT_PLUG_DETECTION_STATE
+	bool "Invert state of plug detection"
+	depends on SIMPLE_REMOTE_PLATFORM
+	help
+	  This option enables to invert headphone plug detection state,
+	  currently the plug detection state was low state when headphone
+	  was inserted, but it is high state on some products, so that
+	  we need invert this state on these products.
+
+config USB_PRODUCT_SUFFIX
+	hex "Suffix of USB product id"
+	default 0
+
+config WLAN_PMUEN_UX500
+	bool "Wlan PMU Enable is controlled separately from GBF_RST"
+	default n
+	help
+	  CW1200-PMU_en will be enabled 300 usecs before CG2900-PDB_en.
+
+	  This is required on some boards for Bluetooth to start.
+
+config U8500_SD_MMC_CARD_GPIO_PWR
+	bool "Configure SD/MMC Card power enable to be controlled via GPIO pin."
+	depends on U8500_SD_MMC_CARD_SUPPORT
+	default n
+	help
+	  This option enables the use of a GPIO pin to power the SD/MMC Card.
+
+endif
