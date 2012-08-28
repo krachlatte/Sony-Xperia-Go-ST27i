@@ -15,6 +15,7 @@
  * Author: Imre Sunyi <imre.sunyi@sonymobile.com>
  */
 
+#include <asm/atomic.h>
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/device.h>
@@ -160,6 +161,8 @@ struct inst_curr_result_list {
  * struct ab8500_fg - ab8500 FG device information
  * @dev:		Pointer to the structure device
  * @node:		a list of AB8500 FGs, hence prepared for reentrance
+ * @irq:	instant current irq number
+ * @cc_irq:	average current irq number
  * @vbat:		Battery voltage in mV
  * @vbat_nom:		Nominal battery voltage in mV
  * @inst_curr:		Instantenous battery current in mA
@@ -182,6 +185,7 @@ struct inst_curr_result_list {
  * @prohibit_uncomp_voltage_replace:
 			True when capacity is not allowed to be replaced with
 			uncompensated voltage
+ * @suspended:		Indicate if driver is in suspend mode
  * @calib_state		State during offset calibration
  * @discharge_state:	Current discharge state
  * @charge_state:	Current charge state
@@ -209,6 +213,7 @@ struct ab8500_fg {
 	struct device *dev;
 	struct list_head node;
 	int irq;
+	int cc_irq;
 	int vbat;
 	int vbat_nom;
 	int inst_curr;
@@ -231,6 +236,7 @@ struct ab8500_fg {
 	bool init_capacity;
 	bool force_vbat_comp;
 	bool prohibit_uncomp_voltage_replace;
+	atomic_t suspended;
 	enum ab8500_fg_calibration_state calib_state;
 	enum ab8500_fg_discharge_state discharge_state;
 	enum ab8500_fg_charge_state charge_state;
@@ -546,7 +552,11 @@ ab8500_fg_coulomb_counter(struct ab8500_fg *di, int samples, bool enable)
 		if (ret)
 			goto cc_err;
 
-		di->flags.fg_enabled = true;
+		if (!di->flags.fg_enabled) {
+			di->flags.fg_enabled = true;
+			enable_irq(di->cc_irq);
+		}
+
 		di->fg_samples = samples;
 
 		/*
@@ -554,6 +564,11 @@ ab8500_fg_coulomb_counter(struct ab8500_fg *di, int samples, bool enable)
 		 */
 		di->nbr_cceoc_irq_cnt = CCEOC_IRQ_SKIP_CNT;
 	} else {
+		if (di->flags.fg_enabled) {
+			di->flags.fg_enabled = false;
+			disable_irq(di->cc_irq);
+		}
+
 		/* Clear any pending read requests */
 		ret = abx500_set_register_interruptible(di->dev,
 			AB8500_GAS_GAUGE, AB8500_GASG_CC_CTRL_REG,
@@ -574,7 +589,6 @@ ab8500_fg_coulomb_counter(struct ab8500_fg *di, int samples, bool enable)
 		if (ret)
 			goto cc_err;
 
-		di->flags.fg_enabled = false;
 		di->flags.conv_done = false;
 		di->fg_samples = 0;
 		di->accu_charge = 0;
@@ -620,7 +634,13 @@ ab8500_fg_inst_curr_start(struct ab8500_fg *di)
 	 * This prevents us from measuring current with disabled FG.
 	 */
 	if (!(reg_val & CC_PWR_UP_ENA)) {
-		dev_dbg(di->dev, "%s Enable FG\n", __func__);
+		if (!di->flags.fg_enabled) {
+			dev_err(di->dev, "Got here from illegal condition\n");
+			ret = -EPERM;
+			goto fail;
+		}
+		dev_warn(di->dev, "%s FG should be enabled but is not\n",
+			 __func__);
 
 		/*
 		 * according to STE, FG should be turned off if current
@@ -628,7 +648,14 @@ ab8500_fg_inst_curr_start(struct ab8500_fg *di)
 		 * Need to be checked, and if possible removed.
 		 */
 		samples = SEC_TO_SAMPLE(10);
+		/*
+		 * Need to unlock 'cc_lock' since it will be held within below
+		 * function.
+		 */
+		mutex_unlock(&di->cc_lock);
 		ret = ab8500_fg_coulomb_counter(di, samples, true);
+		/* Need to lock 'cc_lock' to keep logic same as before unlock */
+		mutex_lock(&di->cc_lock);
 		if (ret)
 			goto fail;
 	}
@@ -795,6 +822,9 @@ static void ab8500_fg_acc_cur_work(struct work_struct *work)
 	struct ab8500_fg *di = container_of(work,
 		struct ab8500_fg, fg_acc_cur_work);
 
+	if (atomic_read(&di->suspended))
+		return;
+
 	mutex_lock(&di->cc_lock);
 	ret = abx500_set_register_interruptible(di->dev, AB8500_GAS_GAUGE,
 		AB8500_GASG_CC_NCOV_ACCU_CTRL, RD_NCONV_ACCU_REQ | RESET_ACCU);
@@ -871,7 +901,8 @@ static void ab8500_fg_acc_cur_work(struct work_struct *work)
 			((di->fg_samples / 4) * 10);
 
 		di->flags.conv_done = true;
-		queue_work(di->fg_wq, &di->fg_work);
+		if (!atomic_read(&di->suspended))
+			queue_work(di->fg_wq, &di->fg_work);
 	}
 
 	mutex_unlock(&di->cc_lock);
@@ -880,7 +911,8 @@ exit:
 	dev_err(di->dev,
 		"Failed to read or write gas gauge registers\n");
 	mutex_unlock(&di->cc_lock);
-	queue_work(di->fg_wq, &di->fg_work);
+	if (!atomic_read(&di->suspended))
+		queue_work(di->fg_wq, &di->fg_work);
 }
 
 /**
@@ -911,14 +943,20 @@ static int ab8500_fg_bat_voltage(struct ab8500_fg *di)
  * @di: pointer to the ab8500_fg structure
  * @v:  holds measured voltage
  * @c:  holds measured current
+ *
+ * Return 0 on success else error code
  */
-static void
+static int
 ab8500_fg_get_synced_vbat_curr(struct ab8500_fg *di, int *v, int *c)
 {
 	int vbat = 0;
 	int i = 0;
+	int ret = ab8500_fg_inst_curr_start(di);
 
-	ab8500_fg_inst_curr_start(di);
+	if (ret < 0) {
+		dev_err(di->dev, "Failed to get synced vbat and curr\n");
+		return ret;
+	}
 
 	do {
 		/*
@@ -937,6 +975,7 @@ ab8500_fg_get_synced_vbat_curr(struct ab8500_fg *di, int *v, int *c)
 
 	dev_dbg(di->dev, "%s Vbat: %dmV (samples: %d), Current: %dmA\n",
 			__func__, *v, i, *c);
+	return 0;
 }
 
 /**
@@ -1716,8 +1755,9 @@ static void ab8500_fg_algorithm_discharging(struct ab8500_fg *di)
 		/* Discard the first [x] seconds */
 		if (di->init_cnt >
 			di->bat->fg_params->init_discard_time) {
-			ab8500_fg_get_synced_vbat_curr(di, &di->vbat,
-					&di->inst_curr);
+			if (ab8500_fg_get_synced_vbat_curr(di, &di->vbat,
+							&di->inst_curr))
+				break;
 
 			ab8500_fg_calc_cap_discharge_voltage(di, true);
 			ab8500_fg_check_capacity_limits(di, true);
@@ -1853,7 +1893,9 @@ static void ab8500_fg_algorithm_discharging(struct ab8500_fg *di)
 
 	case AB8500_FG_DISCHARGE_READOUT:
 		ab8500_fg_check_calc_cap_discharge_fg(di);
-		ab8500_fg_get_synced_vbat_curr(di, &di->vbat, &di->inst_curr);
+		if (ab8500_fg_get_synced_vbat_curr(di, &di->vbat,
+						   &di->inst_curr))
+			break;
 
 		if (ab8500_fg_is_low_curr(di, di->inst_curr) ||
 			di->force_vbat_comp) {
@@ -2009,7 +2051,9 @@ static void ab8500_fg_periodic_work(struct work_struct *work)
 
 	if (di->init_capacity) {
 		/* Get an initial capacity calculation */
-		ab8500_fg_get_synced_vbat_curr(di, &di->vbat, &di->inst_curr);
+		if (ab8500_fg_get_synced_vbat_curr(di, &di->vbat,
+						   &di->inst_curr))
+			return;
 		ab8500_fg_calc_cap_discharge_voltage(di, true);
 		ab8500_fg_check_capacity_limits(di, true);
 		di->init_capacity = false;
@@ -2124,6 +2168,9 @@ static void ab8500_fg_low_bat_work(struct work_struct *work)
 static void ab8500_fg_instant_work(struct work_struct *work)
 {
 	struct ab8500_fg *di = container_of(work, struct ab8500_fg, fg_work);
+
+	if (atomic_read(&di->suspended))
+		return;
 
 	ab8500_fg_algorithm(di);
 }
@@ -2507,7 +2554,12 @@ static void ab8500_fg_reinit_work(struct work_struct *work)
 	if (di->flags.calibrate == false) {
 		dev_dbg(di->dev, "Resetting FG state machine to init.\n");
 		ab8500_fg_clear_cap_samples(di);
-		ab8500_fg_get_synced_vbat_curr(di, &di->vbat, &di->inst_curr);
+		if (ab8500_fg_get_synced_vbat_curr(di, &di->vbat,
+						   &di->inst_curr)) {
+			queue_delayed_work(di->fg_wq, &di->fg_reinit_work,
+					   round_jiffies(1));
+			return;
+		}
 		ab8500_fg_calc_cap_discharge_voltage(di, true);
 		ab8500_fg_charge_state_to(di, AB8500_FG_CHARGE_INIT);
 		ab8500_fg_discharge_state_to(di, AB8500_FG_DISCHARGE_INIT);
@@ -2726,6 +2778,8 @@ static int ab8500_fg_resume(struct platform_device *pdev)
 	struct ab8500_fg *di = platform_get_drvdata(pdev);
 	int samples = 0;
 
+	atomic_set(&di->suspended, 0);
+
 	/*
 	 * enable CC, if it was disabled
 	 */
@@ -2769,12 +2823,21 @@ static int ab8500_fg_suspend(struct platform_device *pdev,
 	}
 	mutex_unlock(&di->shutdown_lock);
 
+	/* Do not allow suspend when there is any actions to complete */
+	if (di->flags.calibrate || di->init_capacity || di->flags.user_cap) {
+		dev_info(di->dev,
+			 "Job(s) active: Calib: %s, InitCap: %s, UserCap: %s\n",
+			 di->flags.calibrate ? "yes" : "no",
+			 di->init_capacity ? "yes" : "no",
+			 di->flags.user_cap ? "yes" : "no");
+		return -EAGAIN;
+	}
+
 	/* Make sure FG work has been executed */
 	flush_workqueue(di->fg_wq);
 
 	/* Make sure any re-arming work in algorithm is stopped */
-	if (!di->flags.calibrate && !di->init_capacity && !di->flags.user_cap)
-		cancel_delayed_work_sync(&di->fg_periodic_work);
+	cancel_delayed_work_sync(&di->fg_periodic_work);
 
 	if (!di->flags.charging) {
 		/*
@@ -2792,6 +2855,8 @@ static int ab8500_fg_suspend(struct platform_device *pdev,
 		if (di->recovery_needed)
 			di->recovery_start = ab8500_fg_get_time();
 	}
+
+	atomic_set(&di->suspended, 1);
 
 	return 0;
 }
@@ -2893,6 +2958,8 @@ static int __devinit ab8500_fg_probe(struct platform_device *pdev)
 
 	di->init_capacity = true;
 
+	atomic_set(&di->suspended, 0);
+
 	ab8500_fg_charge_state_to(di, AB8500_FG_CHARGE_INIT);
 	ab8500_fg_discharge_state_to(di, AB8500_FG_DISCHARGE_INIT);
 
@@ -2959,9 +3026,6 @@ static int __devinit ab8500_fg_probe(struct platform_device *pdev)
 		goto free_shutdown_wq;
 	}
 
-	samples = SEC_TO_SAMPLE(di->bat->fg_params->accu_high_curr);
-	ab8500_fg_coulomb_counter(di, samples, true);
-
 	/*
 	 * Initialize completion used to notify completion and start
 	 * of inst current
@@ -2985,6 +3049,12 @@ static int __devinit ab8500_fg_probe(struct platform_device *pdev)
 	}
 	di->irq = platform_get_irq_byname(pdev, "CCEOC");
 	disable_irq(di->irq);
+
+	di->cc_irq = platform_get_irq_byname(pdev, "NCONV_ACCU");
+	disable_irq(di->cc_irq);
+
+	samples = SEC_TO_SAMPLE(di->bat->fg_params->accu_high_curr);
+	ab8500_fg_coulomb_counter(di, samples, true);
 
 	platform_set_drvdata(pdev, di);
 

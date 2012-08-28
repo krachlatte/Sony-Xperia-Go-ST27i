@@ -253,4 +253,3 @@ config CPU_FREQ_GOV_SMARTASS
 	  If in doubt, say N.
 
 endif	# CPU_FREQ
-
